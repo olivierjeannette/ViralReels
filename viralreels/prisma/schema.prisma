@@ -1,0 +1,301 @@
+// ViralReels SaaS - Prisma Schema
+// Last updated: 2026-01-19
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============== USERS & AUTHENTICATION ==============
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  videos        Video[]
+  subscription  Subscription?
+
+  // Quotas
+  videosThisMonth Int      @default(0)
+  lastQuotaReset  DateTime @default(now())
+
+  @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============== SUBSCRIPTIONS & BILLING ==============
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+
+  plan                 Plan               @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}
+
+enum Plan {
+  FREE
+  CREATOR    // 9.99€/mois
+  PRO        // 24.99€/mois
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  TRIALING
+}
+
+// ============== VIDEOS ==============
+
+model Video {
+  id          String      @id @default(cuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Fichier
+  filename    String
+  originalUrl String      // URL R2 du fichier original
+  duration    Float       // secondes (peut être décimal)
+  resolution  String      // "1920x1080"
+  fileSize    BigInt      // bytes
+  codec       String?     // "h264", "h265", etc.
+  fps         Float?      // frames per second
+
+  // Traitement
+  status      VideoStatus @default(UPLOADED)
+  transcript  Json?       // Transcription complète avec timestamps
+  analysis    Json?       // Analyse de viralité
+
+  // Métadonnées
+  title       String?
+  description String?     @db.Text
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Relations
+  clips       Clip[]
+  jobs        ProcessingJob[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum VideoStatus {
+  UPLOADED      // Fichier uploadé, en attente de traitement
+  PROCESSING    // Extraction métadonnées
+  TRANSCRIBING  // Transcription audio en cours
+  ANALYZING     // Analyse de viralité en cours
+  READY         // Prêt, clips peuvent être générés
+  FAILED        // Échec du traitement
+}
+
+// ============== CLIPS ==============
+
+model Clip {
+  id          String     @id @default(cuid())
+  videoId     String
+  video       Video      @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  // Timing
+  startTime   Float      // secondes (décimal)
+  endTime     Float      // secondes (décimal)
+  duration    Float      // secondes (décimal)
+
+  // Viralité
+  viralityScore   Int        // 0-100
+  viralityReasons String[]   // ["hook", "émotion forte", "question"]
+
+  // Paramètres de génération
+  settings    Json       // ClipSettings (format, sous-titres, etc.)
+
+  // Fichiers générés
+  outputUrl   String?    // URL R2 du clip final
+  thumbnailUrl String?   // URL miniature/preview
+
+  status      ClipStatus @default(SUGGESTED)
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([videoId])
+  @@index([status])
+  @@index([viralityScore(sort: Desc)])
+}
+
+enum ClipStatus {
+  SUGGESTED   // Proposé par l'IA, pas encore validé
+  APPROVED    // Validé par l'utilisateur, en attente de génération
+  GENERATING  // En cours de génération
+  READY       // Prêt à télécharger
+  DOWNLOADED  // Téléchargé par l'utilisateur
+  FAILED      // Échec de génération
+}
+
+// ============== PROCESSING JOBS ==============
+
+model ProcessingJob {
+  id        String    @id @default(cuid())
+  videoId   String
+  video     Video     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  type      JobType
+  status    JobStatus @default(PENDING)
+  progress  Int       @default(0) // 0-100
+
+  input     Json?     // Paramètres d'entrée
+  output    Json?     // Résultat
+  error     String?   @db.Text // Message d'erreur si échec
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([videoId])
+  @@index([status])
+  @@index([type])
+}
+
+enum JobType {
+  TRANSCRIPTION     // Deepgram
+  ANALYSIS          // Analyse IA de viralité
+  CLIP_GENERATION   // Génération d'un clip
+  SUBTITLE_BURN     // Ajout sous-titres
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ============== PROMO CODES ==============
+
+model PromoCode {
+  id          String       @id @default(cuid())
+  code        String       @unique
+
+  discountType DiscountType
+  discountValue Float      // % ou montant fixe en euros
+
+  maxUses     Int?         // null = illimité
+  currentUses Int          @default(0)
+
+  validFrom   DateTime     @default(now())
+  validUntil  DateTime?
+
+  applicablePlans Plan[]   // Plans éligibles
+
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+
+  redemptions PromoRedemption[]
+
+  @@index([code])
+  @@index([isActive])
+}
+
+enum DiscountType {
+  PERCENTAGE      // Ex: 20% de réduction
+  FIXED_AMOUNT    // Ex: 5€ de réduction
+  FREE_MONTHS     // Ex: 1 mois gratuit
+}
+
+model PromoRedemption {
+  id          String   @id @default(cuid())
+  promoCodeId String
+  promoCode   PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+
+  userId      String
+  appliedAt   DateTime @default(now())
+
+  @@index([promoCodeId])
+  @@index([userId])
+  @@unique([promoCodeId, userId]) // Un user ne peut utiliser un code qu'une fois
+}
+
+// ============== ANALYTICS (Phase 3) ==============
+
+model VideoAnalytics {
+  id          String   @id @default(cuid())
+  videoId     String   @unique
+
+  viewCount   Int      @default(0)
+  clipCount   Int      @default(0)
+  downloadCount Int    @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([videoId])
+}
